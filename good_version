@@ -1,0 +1,341 @@
+#include <stdio.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <assert.h>
+
+/*********************************************/
+#define         N_THREADS       3 //Just changed from 30
+#define         CHUNK_SIZE      100
+#define		QUEUE_SIZE	100
+
+typedef enum {false=0, true=1} bool;
+
+typedef struct word_bag {
+        char    *word;
+        int             freq;
+        struct word_bag *next;
+} word_bag_t;
+
+typedef struct {
+        char buf[CHUNK_SIZE + 1];       // add one more byte to hold 
+                                        // the zero for zero-terminated string
+        word_bag_t *head;               // head of the list
+        int tid         ;               // thread id
+	bool done       ;
+} thread_info_t;
+ 
+
+thread_info_t info[N_THREADS]; 
+
+
+
+typedef struct {
+        char buf[CHUNK_SIZE + 1];	/* holds part of file & consumer reads this  */
+	int value;
+	int size;	
+	int used;
+} item_t;
+
+/*********************************************/
+
+#define MAX 10		/* Numbers to produce */
+pthread_mutex_t the_mutex;
+pthread_cond_t condc, condp;
+item_t queue[QUEUE_SIZE];       /*This is the globar array to pass info*/
+int num_elem   =    0;
+int next_index =    0; 
+int buffer     =    0;
+int number     =    0;
+int i          =    0;
+int sz	       =    0;
+int end              ;
+bool phil      = true;
+bool sally     = true;
+
+
+/* look for a word in the list
+ *  *    return null if it is not found or a pointer to it*/
+word_bag_t *find_word(word_bag_t *head, char *word) {
+        if (head == NULL) {
+                return NULL;
+        } else {
+                word_bag_t *t = head;
+                for (; t != NULL; t = t->next) {
+                        if (strcmp(t->word, word) == 0) {
+                                return t;
+                        }
+                }
+                return NULL;
+        }
+}
+
+/* create a new word and add it as the new head of the list
+ *  *    note: double pointer is required to allow the value of the head to be updated */
+word_bag_t *new_word(word_bag_t **head, char *word) {
+        word_bag_t *bag = (word_bag_t *) malloc(sizeof(word_bag_t));
+        bag->next = NULL;
+        bag->word = word;
+        bag->freq = 0;
+
+        bag->next = *head;
+        *head = bag;
+        return bag;
+}
+
+/* count the word that we found */
+/* the word is between buf[start] to buf[end]*/
+/* note: start == end when this is a single char word*/
+void count_word(word_bag_t **head, char *buf, int start, int end) {
+        assert(end >= start);
+        char *new_word_str = (char *) malloc(end - start + 2);
+        strncpy(new_word_str, &buf[start], end - start + 1);
+        new_word_str[end - start + 1] = 0;
+
+        /* add it to linked list if it does not exist*/
+        /* or find where it is in the linked list;*/
+
+       word_bag_t *word = find_word(*head, new_word_str);
+        if (word == NULL) {
+
+                word = new_word(head, new_word_str);
+
+        } else {
+                free(new_word_str);
+        }
+        word->freq = word->freq + 1;
+}
+
+/******************************************************************************************/
+item_t *consume_item() {
+	for (i = 0; i < QUEUE_SIZE; i++) {
+		if (queue[i].used == true) {
+			item_t *item = &queue[i];
+			item->used = false;
+			num_elem--;
+			return item;
+		}
+	}
+	return NULL;
+}
+
+item_t *produce_item() {
+        for (i = 0; i < QUEUE_SIZE; i++) {
+                if (queue[(next_index + i) % QUEUE_SIZE].used == false) {
+                        item_t *item = &queue[(next_index + i) % QUEUE_SIZE];
+                        item->used = true;
+                        num_elem++;
+                        next_index = (i + 1) % QUEUE_SIZE;
+                        return item;
+                }
+        }
+
+        return NULL;
+}
+/******************************************************************************************/
+
+void* producer(void *f) 
+{//producer will read from file and send queue to consumer
+
+   	FILE *file = fopen(f, "r");		                /* opening passed file from main  */
+	
+	while(!feof(file))                                      /* Run producer until eof  */
+	{	
+		pthread_mutex_lock(&the_mutex);		        /* protect buffer */
+			
+		if (num_elem == QUEUE_SIZE)                     /* Want this HERE before the read!  */
+		{
+			pthread_cond_wait(&condp, &the_mutex);	/* producer stops, conumer picks up*/
+		}
+
+		/* thread_info[1]= produce_item(); */
+		pthread_cond_signal(&condc);    /* wake up consumer  */
+
+		item_t *item = produce_item(); 
+/******************************************************************/
+		 if (item != NULL) 
+		{
+                        //item->value = count;
+                        //count++;
+			sz = fread(item->buf, 1, CHUNK_SIZE, file); /* sz gets CHUNK or less & reading file  */
+			item->buf[sz] = 0;
+			item->size = sz;
+	                printf("%s\n ",item->buf);
+
+ 			end = sz;
+                	if (!feof(file))
+                	{
+                        	for (end = sz-1; end >= 0; end--)
+                        	{
+	                           if ((item->buf[end] == ' ') || (item->buf[end] == '\t') || (item->buf[end] == '\n') || (item->buf[end] == '\r')) {break;}
+        	                   else {ungetc(item->buf[end],file);}  /* fseek works as well, lets see what unget does tho!  */
+                	        }
+                        	item->buf[end] =     0; //Null terminatin ahl dai
+	                        item->size     = end-1;
+        	                item->used     =     1;
+                	}
+
+	                if (item->size != 0)
+        	        {
+                	        pthread_cond_signal(&condc);    /* wake up consumer  */
+	                }
+			
+			if(feof(file)){
+				phil = false;
+				printf("\n\n\nHello from flag\n\n\n\n");
+		                pthread_mutex_unlock(&the_mutex);       /* release the buffer */
+				fclose(file);
+                                break;
+			}
+                       // fseek(file, end-sz+1, SEEK_CUR);
+
+                }//End open if
+                if (num_elem == 1) {
+                        pthread_cond_signal(&condc);
+                }
+/******************************************************************/
+		pthread_mutex_unlock(&the_mutex);	/* release the buffer */
+	}//end of while
+	//fclose(file);
+	pthread_exit(0);
+	//return NULL;
+}
+
+void* consumer(void *argin) 
+{//consumer will count word frequency derived from producer
+
+	thread_info_t *arg = (thread_info_t *) argin;
+        word_bag_t **head  = &arg->head;
+	int this_id = arg -> tid;
+	while(phil ||  num_elem)
+	{
+		pthread_mutex_lock(&the_mutex);	/* protect buffer */
+		if (num_elem == 0 || info[this_id].done ==true) // if 0 then wait
+		{
+      		        pthread_cond_wait(&condc, &the_mutex);
+		}
+
+		item_t *item = consume_item();		        /* gives a CHUNK to play with  */
+		if(item != NULL)
+		{
+			int i;
+		        for (i = 0; i <= strlen(item->buf); i++) 
+			{
+	                	if (item->buf[i] != ' ') {break;}
+	        	}
+			int start = i, end = i;
+        		for (; i <= strlen(item->buf); i++) {
+                		if (item->buf[i] == ' ') {
+                        		if (i > 0) {end = i - 1;}
+		                        count_word(head, item->buf, start, end);
+		                      	for (;i <= strlen(item->buf); i++) {
+        		                        if (item->buf[i] != ' ') break;
+	                        	}
+        	                start = i;
+				}
+			}
+			if (start != strlen(item->buf)) {
+      	        	  	count_word(head, item->buf, start, strlen(item->buf));
+			}
+		}//End open if
+	 	
+
+		if (num_elem == QUEUE_SIZE - 1 && phil) 
+		{
+	      		pthread_cond_signal(&condp);       /* wake up producer  */
+		}
+
+		pthread_mutex_unlock(&the_mutex);	/* release the buffer */
+	}//end while
+	pthread_exit(0);
+	//return NULL;
+}
+
+
+/* merge the lists of threads*/
+void merge() {
+        word_bag_t *head = NULL;
+        int tid;
+        for (tid = 0; tid < N_THREADS; tid++) {
+		printf("\nMERGE FOR-LOOP\n");
+                word_bag_t *t = info[tid].head;
+                /* iterate to each thread's list */
+                for (; t != NULL; t = t->next) {
+                        word_bag_t *word_ptr = find_word(head, t->word);
+                        if (word_ptr == NULL) {
+                                word_ptr = new_word(&head, t->word);
+                        } 
+                        word_ptr->freq = word_ptr->freq + t->freq;
+                }
+        }
+        
+        printf("\n\n\n");
+        printf("******** FINAL WORD COUNT ********\n");
+        word_bag_t *t = head;
+        for (; t != NULL; t = t->next) 
+	{
+                 printf("final [%s] %d\n", t->word, t->freq);
+        }        
+}
+
+
+
+
+
+
+
+int main(int argc, char **argv) 
+{
+	pthread_t pro, con, con2, con3;
+
+	// Initialize the mutex and condition variables
+	/* What's the NULL for ??? */
+	pthread_mutex_init(&the_mutex, NULL);	
+	pthread_cond_init(&condc, NULL);		/* Initialize consumer condition variable */
+	pthread_cond_init(&condp, NULL);		/* Initialize producer condition variable */
+
+
+	for (i=0; i<QUEUE_SIZE; i++)
+	{
+		queue[i].used = false;
+	}
+
+	info[0].tid = 0;
+	info[1].tid = 1;
+	info[2].tid = 2;
+
+        info[0].done = false;
+        info[1].done = false;
+        info[2].done = false;
+
+	// Create the threads
+	pthread_create(&con,  NULL, consumer, (void *)&info[0]);
+	pthread_create(&con2, NULL, consumer, (void *)&info[1]);
+	pthread_create(&con3, NULL, consumer, (void *)&info[2]);
+
+	pthread_create(&pro, NULL, producer, argv[1]);
+
+	// Wait for the threads to finish
+	// Otherwise main might run to the end
+	// and kill the entire process when it exits.
+
+
+
+	pthread_join(con, NULL);
+	pthread_join(con2, NULL);
+	pthread_join(con3, NULL);
+
+
+
+
+	pthread_join(pro, NULL);
+	// Cleanup -- would happen automatically at end of program
+	merge();
+	pthread_mutex_destroy(&the_mutex);	/* Free up the_mutex */
+	pthread_cond_destroy(&condc);		/* Free up consumer condition variable */
+	pthread_cond_destroy(&condp);		/* Free up producer condition variable */
+
+/*********************************************/
+	return 0;
+}
